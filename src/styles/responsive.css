@@ -1,0 +1,158 @@
+@media (max-width: 900px) {
+  .sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 50;
+    margin-left: 0;
+    transform: translateX(-100%);
+    transition: transform 0.26s cubic-bezier(0.2, 0.7, 0.3, 1);
+    box-shadow: 0 0 0 1px var(--border);
+  }
+
+  .app.sidebar-open .sidebar {
+    transform: translateX(0);
+  }
+
+  .app:not(.sidebar-open) .sidebar {
+    margin-left: 0;
+  }
+
+  .topbar {
+    height: 54px;
+    padding: 0 8px;
+  }
+
+  .thread {
+    padding: 14px 14px 24px;
+  }
+
+  .empty-inner {
+    transform: none;
+  }
+
+  .empty h1 {
+    font-size: 26px;
+  }
+
+  .user-bubble {
+    max-width: 86%;
+  }
+
+  .composer {
+    padding: 0 10px 10px;
+  }
+
+  .title-btn {
+    max-width: 54vw;
+  }
+
+  .overlay {
+    padding: 8vh 12px 12px;
+  }
+
+  .modal {
+    max-height: 80vh;
+  }
+}
+
+@media (max-width: 640px) {
+  .suggests {
+    grid-template-columns: 1fr;
+  }
+
+  .empty {
+    padding-bottom: 20px;
+  }
+
+  .empty h1 {
+    margin-bottom: 22px;
+    font-size: 24px;
+  }
+
+  .composer-note {
+    font-size: 10.5px;
+  }
+
+  .msg {
+    gap: 10px;
+    margin-bottom: 24px;
+  }
+
+  .msg-user {
+    margin-bottom: 20px;
+  }
+
+  .chapter-title {
+    font-size: 19px;
+  }
+
+  .chapter-foot {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .chapter-nav {
+    width: 100%;
+  }
+
+  .chapter-nav .pill {
+    flex: 1;
+    justify-content: center;
+  }
+
+  .overlay {
+    padding: 6vh 8px 8px;
+  }
+
+  .modal {
+    max-height: 84vh;
+    border-radius: 16px;
+  }
+
+  .modal-head {
+    padding: 14px 14px 10px;
+  }
+
+  .composer-box {
+    padding: 8px 8px 6px 12px;
+  }
+
+  .title-text {
+    font-size: 16px;
+  }
+
+  .confirm-actions {
+    padding: 16px 18px 18px;
+  }
+
+  .confirm-body {
+    padding: 20px 18px 6px;
+  }
+}
+
+@media (hover: none) {
+  .msg-actions,
+  .lib-del,
+  .chat-more,
+  .user-gear {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .caret {
+    animation: none;
+  }
+}
