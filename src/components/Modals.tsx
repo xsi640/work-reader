@@ -11,7 +11,8 @@ import {
   X,
 } from 'lucide-react';
 import type { Book, Settings } from '../types';
-import { searchBook } from '../lib/prefs';
+import { searchChapters } from '../lib/db';
+import { formatBytes, formatChars } from '../lib/format';
 import { ReaderControls } from './Controls';
 import { Highlight } from './Highlight';
 import { Mark } from './Logo';
@@ -61,23 +62,48 @@ export function SearchModal({
   onOpenBook: (bookId: string, chapter: number) => void;
 }) {
   const [query, setQuery] = useState('');
-  const results = useMemo(() => {
-    const q = query.trim();
-    if (!q) return [];
-    const out: { book: Book; chapter: number; snippet: string }[] = [];
-    for (const book of books) {
-      for (const hit of searchBook(book, q)) {
-        out.push({ book, ...hit });
-        if (out.length >= 30) return out;
-      }
-    }
-    return out;
-  }, [books, query]);
+  const [results, setResults] = useState<
+    { book: Book; chapter: number; snippet: string }[]
+  >([]);
+  const [searching, setSearching] = useState(false);
 
   const recent = useMemo(
     () => [...books].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 6),
     [books],
   );
+
+  useEffect(() => {
+    const q = query.trim();
+    if (!q) {
+      setResults([]);
+      setSearching(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    setSearching(true);
+    const timer = window.setTimeout(async () => {
+      const found: { book: Book; chapter: number; snippet: string }[] = [];
+      try {
+        for (const book of books) {
+          if (controller.signal.aborted) return;
+          const hits = await searchChapters(book.id, q, 6, controller.signal);
+          for (const hit of hits) found.push({ book, ...hit });
+          if (found.length >= 30) break;
+        }
+        if (!controller.signal.aborted) setResults(found);
+      } catch {
+        if (!controller.signal.aborted) setResults([]);
+      } finally {
+        if (!controller.signal.aborted) setSearching(false);
+      }
+    }, 160);
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [books, query]);
 
   return (
     <ModalShell onClose={onClose} className="modal-search">
@@ -97,7 +123,9 @@ export function SearchModal({
 
       <div className="modal-scroll">
         {query.trim() ? (
-          results.length ? (
+          searching ? (
+            <div className="modal-empty">正在逐章搜索…</div>
+          ) : results.length ? (
             results.map((result, index) => (
               <button
                 type="button"
@@ -108,7 +136,8 @@ export function SearchModal({
                 <span className="sr-top">
                   <span className="sr-book">{result.book.title}</span>
                   <span className="sr-chapter">
-                    第 {result.chapter + 1} 章 · {result.book.chapters[result.chapter]?.title ?? ''}
+                    第 {result.chapter + 1} 章 ·{' '}
+                    {result.book.chapterTitles[result.chapter] ?? ''}
                   </span>
                 </span>
                 <span className="sr-snippet">
@@ -138,7 +167,7 @@ export function SearchModal({
                     <span className="recent-main">
                       <span className="recent-title">{book.title}</span>
                       <span className="recent-meta">
-                        {book.author} · 第 {chapter + 1} 章 / 共 {book.chapters.length} 章
+                        {book.author} · 第 {chapter + 1} 章 / 共 {book.chapterCount} 章
                       </span>
                     </span>
                   </button>
@@ -161,6 +190,8 @@ export function SearchModal({
   );
 }
 
+const TOC_PAGE_SIZE = 200;
+
 export function TocModal({
   book,
   progress,
@@ -174,36 +205,95 @@ export function TocModal({
   onClose: () => void;
   onOpenChapter: (chapter: number) => void;
 }) {
+  const [filter, setFilter] = useState('');
+  const [page, setPage] = useState(() => Math.floor(progress / TOC_PAGE_SIZE));
+
+  const indexes = useMemo(() => {
+    const needle = filter.trim().toLowerCase();
+    const list: number[] = [];
+    for (let index = 0; index < book.chapterCount; index += 1) {
+      const title = book.chapterTitles[index] ?? '';
+      if (!needle || title.toLowerCase().includes(needle) || String(index + 1) === needle) {
+        list.push(index);
+      }
+    }
+    return list;
+  }, [book, filter]);
+
+  const totalPages = Math.max(1, Math.ceil(indexes.length / TOC_PAGE_SIZE));
+  const safePage = Math.min(page, totalPages - 1);
+  const visible = indexes.slice(safePage * TOC_PAGE_SIZE, (safePage + 1) * TOC_PAGE_SIZE);
+  const from = indexes.length ? safePage * TOC_PAGE_SIZE + 1 : 0;
+  const to = Math.min(indexes.length, (safePage + 1) * TOC_PAGE_SIZE);
+
   return (
     <ModalShell onClose={onClose} className="modal-list">
       <div className="modal-head">
-        <div>
+        <div className="modal-head-main">
           <h2>{book.title}</h2>
           <p className="modal-sub">
-            {book.author} · 共 {book.chapters.length} 章 · 当前第 {progress + 1} 章
+            {book.author} · 共 {book.chapterCount} 章 · 当前第 {progress + 1} 章
           </p>
+          <input
+            className="toc-filter"
+            value={filter}
+            onChange={(event) => {
+              setFilter(event.target.value);
+              setPage(0);
+            }}
+            placeholder="筛选章节，例如「第 12 章」或标题关键词"
+            aria-label="筛选章节"
+          />
         </div>
         <button type="button" className="icon-btn" onClick={onClose} aria-label="关闭">
           <X size={18} />
         </button>
       </div>
+
       <div className="modal-scroll">
-        {book.chapters.map((chapter, index) => (
+        {visible.length ? (
+          visible.map((index) => (
+            <button
+              type="button"
+              key={index}
+              className={`toc-modal-row${index === progress ? ' current' : ''}`}
+              onClick={() => onOpenChapter(index)}
+            >
+              <span className="toc-modal-num">{String(index + 1).padStart(2, '0')}</span>
+              <span className="toc-modal-main">
+                <span className="toc-modal-title">{book.chapterTitles[index] ?? ''}</span>
+              </span>
+              {bookmarks.includes(index) ? <Bookmark size={15} fill="currentColor" /> : null}
+              {index === progress ? <span className="toc-badge">在读</span> : null}
+            </button>
+          ))
+        ) : (
+          <div className="modal-empty">没有匹配的章节。</div>
+        )}
+      </div>
+
+      <div className="toc-pager">
+        <span>
+          {indexes.length ? `${from}–${to} / ${indexes.length} 章` : '0 章'}
+        </span>
+        <div className="toc-pager-btns">
           <button
             type="button"
-            key={index}
-            className={`toc-modal-row${index === progress ? ' current' : ''}`}
-            onClick={() => onOpenChapter(index)}
+            className="btn btn-ghost"
+            disabled={safePage <= 0}
+            onClick={() => setPage((value) => Math.max(0, value - 1))}
           >
-            <span className="toc-modal-num">{String(index + 1).padStart(2, '0')}</span>
-            <span className="toc-modal-main">
-              <span className="toc-modal-title">{chapter.title}</span>
-              <span className="toc-modal-sub">{chapter.paragraphs[0]?.slice(0, 48) ?? ''}…</span>
-            </span>
-            {bookmarks.includes(index) ? <Bookmark size={15} fill="currentColor" /> : null}
-            {index === progress ? <span className="toc-badge">在读</span> : null}
+            上一页
           </button>
-        ))}
+          <button
+            type="button"
+            className="btn btn-ghost"
+            disabled={safePage >= totalPages - 1}
+            onClick={() => setPage((value) => Math.min(totalPages - 1, value + 1))}
+          >
+            下一页
+          </button>
+        </div>
       </div>
     </ModalShell>
   );
@@ -226,7 +316,7 @@ export function LibraryModal({
   onDelete: (id: string) => void;
   onRestoreDemo: () => void;
 }) {
-  const totalChapters = books.reduce((sum, book) => sum + book.chapters.length, 0);
+  const totalChapters = books.reduce((sum, book) => sum + book.chapterCount, 0);
 
   return (
     <ModalShell onClose={onClose} className="modal-library">
@@ -246,7 +336,7 @@ export function LibraryModal({
         {books.length ? (
           books.map((book) => {
             const chapter = progress[book.id] ?? 0;
-            const percent = Math.round(((chapter + 1) / book.chapters.length) * 100);
+            const percent = Math.round(((chapter + 1) / Math.max(1, book.chapterCount)) * 100);
             return (
               <div className="lib-row" key={book.id}>
                 <button type="button" className="lib-open" onClick={() => onOpenBook(book.id)}>
@@ -254,7 +344,7 @@ export function LibraryModal({
                   <span className="lib-main">
                     <span className="lib-title">{book.title}</span>
                     <span className="lib-meta">
-                      {book.author} · {book.chapters.length} 章 · 已读 {percent}%
+                      {book.author} · {book.chapterCount} 章 · 已读 {percent}%
                     </span>
                     <span className="lib-bar">
                       <span style={{ width: `${percent}%` }} />
@@ -297,12 +387,16 @@ export function LibraryModal({
 
 export function SettingsModal({
   settings,
+  storage,
+  library,
   onChange,
   onClose,
   onResetProgress,
   onClearBooks,
 }: {
   settings: Settings;
+  storage: { usage: number; quota: number } | null;
+  library: { books: number; chars: number };
   onChange: (patch: Partial<Settings>) => void;
   onClose: () => void;
   onResetProgress: () => void;
@@ -334,7 +428,20 @@ export function SettingsModal({
           <Trash2 size={16} />
           删除所有书籍
         </button>
-        <p className="modal-note">书库、进度和书签只保存在这个浏览器里，不会上传到任何服务器。</p>
+        <div className="storage-line">
+          <span>书库内容</span>
+          <strong>
+            {library.books} 本 · {formatChars(library.chars)}
+          </strong>
+        </div>
+        <div className="storage-line">
+          <span>浏览器配额</span>
+          <strong>{storage && storage.quota > 0 ? formatBytes(storage.quota) : '统计中…'}</strong>
+        </div>
+        <p className="modal-note">
+          书库、进度和书签只保存在这个浏览器里，不会上传到任何服务器。单个 TXT 上限 200 MB；
+          超过 20 MB 会以流式方式解析，不占用整块内存。
+        </p>
 
         <div className="panel-divider" />
 
@@ -463,6 +570,54 @@ export function AboutModal({ onClose }: { onClose: () => void }) {
         </p>
         <button type="button" className="btn btn-primary about-close" onClick={onClose}>
           开始阅读
+        </button>
+      </div>
+    </ModalShell>
+  );
+}
+
+export function ImportOverlay({
+  name,
+  loaded,
+  total,
+  chapters,
+  onCancel,
+}: {
+  name: string;
+  loaded: number;
+  total: number;
+  chapters: number;
+  onCancel: () => void;
+}) {
+  const percent = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
+
+  return (
+    <ModalShell onClose={onCancel} className="modal-import">
+      <div className="import-body">
+        <h2>正在导入</h2>
+        <p className="import-name">{name}</p>
+        <div
+          className="import-bar"
+          role="progressbar"
+          aria-valuenow={percent}
+          aria-valuemin={0}
+          aria-valuemax={100}
+        >
+          <span style={{ width: `${percent}%` }} />
+        </div>
+        <div className="import-meta">
+          <span>
+            {formatBytes(loaded)} / {formatBytes(total)}
+          </span>
+          <span>{chapters} 章</span>
+        </div>
+        <p className="modal-note">
+          文件只在本机流式解析。可以随时取消，已经写入的章节会被清理干净。
+        </p>
+      </div>
+      <div className="confirm-actions">
+        <button type="button" className="btn btn-ghost" onClick={onCancel}>
+          取消导入
         </button>
       </div>
     </ModalShell>

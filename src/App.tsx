@@ -6,6 +6,7 @@ import { Popover } from './components/Menu';
 import {
   AboutModal,
   ConfirmModal,
+  ImportOverlay,
   LibraryModal,
   RenameModal,
   SearchModal,
@@ -15,20 +16,27 @@ import {
 import { Sidebar } from './components/Sidebar';
 import { EmptyState, Thread } from './components/Thread';
 import { Topbar } from './components/Topbar';
-import { DEMO_BOOKS } from './data/demo';
-import { clearBooks, getAllBooks, removeBook, saveBook } from './lib/db';
+import {
+  clearBooks,
+  estimateStorage,
+  getAllBooks,
+  getChapter,
+  removeBook,
+  saveBook,
+  searchChapters,
+} from './lib/db';
+import { ImportTooLargeError, MAX_IMPORT_BYTES, importTxtFile } from './lib/importer';
+import { seedDemoBooks } from './lib/seed';
 import {
   cnToNumber,
   loadBookmarks,
   loadLastBook,
   loadProgress,
   loadSettings,
-  parseTxt,
   saveBookmarks,
   saveLastBook,
   saveProgress,
   saveSettings,
-  searchBook,
 } from './lib/prefs';
 import type { Book, Msg, Settings } from './types';
 
@@ -51,6 +59,23 @@ const uid = () =>
     : Math.random().toString(36).slice(2);
 
 const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n));
+
+/** 内存里最多保留最近 8 章正文，旧章节只留在 IndexedDB。 */
+const MAX_THREAD_CHAPTERS = 8;
+
+function pruneChapters(list: Msg[]): Msg[] {
+  let seen = 0;
+  const kept: Msg[] = [];
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    const msg = list[index];
+    if (msg.role === 'assistant' && msg.kind === 'chapter') {
+      seen += 1;
+      if (seen > MAX_THREAD_CHAPTERS) continue;
+    }
+    kept.push(msg);
+  }
+  return kept.reverse();
+}
 
 type ModalState =
   | { type: 'search' }
@@ -81,10 +106,21 @@ export default function App() {
   const [panel, setPanel] = useState<{ x: number; y: number } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [dropActive, setDropActive] = useState(false);
+  const [importJob, setImportJob] = useState<{
+    name: string;
+    loaded: number;
+    total: number;
+    chapters: number;
+  } | null>(null);
+  const [storage, setStorage] = useState<{ usage: number; quota: number } | null>(null);
 
   const scrollerRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const toastTimer = useRef<number | null>(null);
+  const importAbortRef = useRef<AbortController | null>(null);
+  const loadTokenRef = useRef(0);
+  const latestSearchRef = useRef<string | null>(null);
+  const searchAbortRef = useRef<AbortController | null>(null);
   const booksRef = useRef(books);
   const activeIdRef = useRef(activeId);
   const progressRef = useRef(progress);
@@ -113,6 +149,8 @@ export default function App() {
   useEffect(
     () => () => {
       if (toastTimer.current) window.clearTimeout(toastTimer.current);
+      importAbortRef.current?.abort();
+      searchAbortRef.current?.abort();
       window.speechSynthesis?.cancel();
     },
     [],
@@ -125,8 +163,7 @@ export default function App() {
         let list = await getAllBooks();
         const seeded = localStorage.getItem('work-reader:seeded') === '1';
         if (!list.length && !seeded) {
-          list = DEMO_BOOKS.map((book) => ({ ...book }));
-          await Promise.all(list.map(saveBook));
+          list = await seedDemoBooks();
           localStorage.setItem('work-reader:seeded', '1');
         }
         if (!cancelled) {
@@ -144,6 +181,16 @@ export default function App() {
       cancelled = true;
     };
   }, [showToast]);
+
+  useEffect(() => {
+    if (!importJob) return;
+    const handler = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [importJob]);
 
   useEffect(() => {
     const mq = window.matchMedia('(prefers-color-scheme: dark)');
@@ -176,6 +223,15 @@ export default function App() {
   const updateSettings = useCallback((patch: Partial<Settings>) => {
     setSettings((prev) => ({ ...prev, ...patch }));
   }, []);
+
+  const refreshStorage = useCallback(async () => {
+    const estimate = await estimateStorage();
+    setStorage(estimate);
+  }, []);
+
+  useEffect(() => {
+    void refreshStorage();
+  }, [refreshStorage]);
 
   const stopSpeech = useCallback(() => {
     window.speechSynthesis?.cancel();
@@ -220,31 +276,53 @@ export default function App() {
   }, []);
 
   const openBook = useCallback(
-    (id: string, chapter?: number, opts?: { userText?: string }) => {
+    async (id: string, chapter?: number, opts?: { userText?: string }) => {
       const book = booksRef.current.find((item) => item.id === id);
-      if (!book || !book.chapters.length) {
+      if (!book || !book.chapterCount) {
         showToast('这本书还没有可读的章节');
         return;
       }
+
+      searchAbortRef.current?.abort();
+      searchAbortRef.current = null;
+      latestSearchRef.current = null;
+      const token = ++loadTokenRef.current;
       stopSpeech();
-      const index = clamp(chapter ?? progressRef.current[id] ?? 0, 0, book.chapters.length - 1);
+      setModal(null);
+      setPanel(null);
+      if (isMobile) setSidebarOpen(false);
+
+      const index = clamp(chapter ?? progressRef.current[id] ?? 0, 0, book.chapterCount - 1);
+      const data = await getChapter(id, index);
+      if (token !== loadTokenRef.current) return;
+
+      if (!data) {
+        showToast('章节读取失败，请重试');
+        return;
+      }
+
       const messageId = uid();
       const initial: Msg[] = opts?.userText
         ? [{ id: uid(), role: 'user', text: opts.userText }]
         : [];
+
       activeIdRef.current = id;
       setActiveId(id);
       setMessages([
         ...initial,
-        { id: messageId, role: 'assistant', kind: 'chapter', bookId: id, chapter: index },
+        {
+          id: messageId,
+          role: 'assistant',
+          kind: 'chapter',
+          bookId: id,
+          chapter: index,
+          data,
+        },
       ]);
       setStreamingId(messageId);
       markProgress(id, index);
       saveLastBook(id);
       touchBook(id);
-      setModal(null);
-      setPanel(null);
-      if (isMobile) setSidebarOpen(false);
       requestAnimationFrame(() => scrollerRef.current?.scrollTo({ top: 0 }));
     },
     [isMobile, markProgress, showToast, stopSpeech, touchBook],
@@ -260,23 +338,41 @@ export default function App() {
   );
 
   const goToChapter = useCallback(
-    (index: number) => {
+    async (index: number) => {
       const book = booksRef.current.find((item) => item.id === activeIdRef.current);
       if (!book) return;
       if (index < 0) {
         pushText('已经是第一章了。');
         return;
       }
-      if (index >= book.chapters.length) {
-        pushText(`已经读到最后一章了。《${book.title}》共 ${book.chapters.length} 章。`);
+      if (index >= book.chapterCount) {
+        pushText(`已经读到最后一章了。《${book.title}》共 ${book.chapterCount} 章。`);
         return;
       }
+
+      const token = ++loadTokenRef.current;
       stopSpeech();
+      const data = await getChapter(book.id, index);
+      if (token !== loadTokenRef.current || activeIdRef.current !== book.id) return;
+      if (!data) {
+        pushText('这一章读取失败，请重试。');
+        return;
+      }
+
       const messageId = uid();
-      setMessages((prev) => [
-        ...prev,
-        { id: messageId, role: 'assistant', kind: 'chapter', bookId: book.id, chapter: index },
-      ]);
+      setMessages((prev) =>
+        pruneChapters([
+          ...prev,
+          {
+            id: messageId,
+            role: 'assistant',
+            kind: 'chapter',
+            bookId: book.id,
+            chapter: index,
+            data,
+          },
+        ]),
+      );
       setStreamingId(messageId);
       markProgress(book.id, index);
       touchBook(book.id);
@@ -344,10 +440,13 @@ export default function App() {
   );
 
   const send = useCallback(
-    (raw: string) => {
+    async (raw: string) => {
       const text = raw.trim();
       if (!text) return;
       setStreamingId(null);
+      searchAbortRef.current?.abort();
+      searchAbortRef.current = null;
+      latestSearchRef.current = null;
       const book = booksRef.current.find((item) => item.id === activeIdRef.current) ?? null;
 
       if (!book) {
@@ -357,7 +456,7 @@ export default function App() {
           return title === needle || needle.includes(title) || title.includes(needle);
         });
         if (matched) {
-          openBook(matched.id, 0, { userText: text });
+          void openBook(matched.id, 0, { userText: text });
           return;
         }
         setMessages((prev) => [...prev, { id: uid(), role: 'user', text }]);
@@ -370,11 +469,11 @@ export default function App() {
       const compact = text.toLowerCase().replace(/\s+/g, '');
 
       if (/^(下一章|下章|继续|继续读|继续阅读|next)/.test(compact)) {
-        goToChapter(current + 1);
+        void goToChapter(current + 1);
         return;
       }
       if (/^(上一章|上章|prev)/.test(compact)) {
-        goToChapter(current - 1);
+        void goToChapter(current - 1);
         return;
       }
       if (/^(目录|章节|toc|contents)/.test(compact)) {
@@ -386,7 +485,7 @@ export default function App() {
         return;
       }
       if (/^(从头|开头|重新开始|重新读)/.test(compact)) {
-        goToChapter(0);
+        void goToChapter(0);
         return;
       }
 
@@ -394,12 +493,12 @@ export default function App() {
       if (chapterMatch) {
         const n = cnToNumber(chapterMatch[1]);
         if (n && n >= 1) {
-          goToChapter(n - 1);
+          void goToChapter(n - 1);
           return;
         }
       }
       if (/^\d+$/.test(text)) {
-        goToChapter(Number(text) - 1);
+        void goToChapter(Number(text) - 1);
         return;
       }
 
@@ -409,19 +508,50 @@ export default function App() {
         pushText('想找什么？把关键词发给我就行。');
         return;
       }
-      const hits = searchBook(book, query);
-      if (!hits.length) {
-        pushText(
-          `没有在《${book.title}》里找到「${query}」。可以换个更短的词，或者输入「目录」翻一翻。`,
-        );
-        return;
-      }
-      const hitId = uid();
+
+      const searchId = uid();
+      const searchController = new AbortController();
+      searchAbortRef.current = searchController;
+      latestSearchRef.current = searchId;
       setMessages((prev) => [
         ...prev,
-        { id: hitId, role: 'assistant', kind: 'hits', bookId: book.id, query, hits },
+        {
+          id: searchId,
+          role: 'assistant',
+          kind: 'text',
+          text: `正在书中查找「${query}」…`,
+        },
       ]);
-      scrollToMessage(hitId);
+      scrollToMessage(searchId);
+
+      try {
+        const hits = await searchChapters(book.id, query, 40, searchController.signal);
+        if (latestSearchRef.current !== searchId || activeIdRef.current !== book.id) {
+          setMessages((prev) => prev.filter((msg) => msg.id !== searchId));
+          return;
+        }
+        const next: Msg = hits.length
+          ? { id: searchId, role: 'assistant', kind: 'hits', bookId: book.id, query, hits }
+          : {
+              id: searchId,
+              role: 'assistant',
+              kind: 'text',
+              text: `没有在《${book.title}》里找到「${query}」。可以换个更短的词，或者输入「目录」翻一翻。`,
+            };
+        setMessages((prev) => prev.map((msg) => (msg.id === searchId ? next : msg)));
+      } catch {
+        if (latestSearchRef.current === searchId) {
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === searchId
+                ? { id: searchId, role: 'assistant', kind: 'text', text: '搜索失败，请重试。' }
+                : msg,
+            ),
+          );
+        }
+      } finally {
+        if (searchAbortRef.current === searchController) searchAbortRef.current = null;
+      }
     },
     [goToChapter, openBook, pushText, pushToc, scrollToMessage, toggleBookmark],
   );
@@ -435,21 +565,25 @@ export default function App() {
       setModal({ type: 'library' });
       return;
     }
-    openBook(book.id, progressRef.current[book.id] ?? 0);
+    void openBook(book.id, progressRef.current[book.id] ?? 0);
   }, [openBook]);
 
   const randomRead = useCallback(() => {
-    const list = booksRef.current.filter((book) => book.chapters.length > 0);
+    const list = booksRef.current.filter((book) => book.chapterCount > 0);
     if (!list.length) {
       setModal({ type: 'library' });
       return;
     }
     const book = list[Math.floor(Math.random() * list.length)];
-    openBook(book.id, Math.floor(Math.random() * book.chapters.length));
+    void openBook(book.id, Math.floor(Math.random() * book.chapterCount));
   }, [openBook]);
 
   const newChat = useCallback(() => {
     stopSpeech();
+    loadTokenRef.current += 1;
+    searchAbortRef.current?.abort();
+    searchAbortRef.current = null;
+    latestSearchRef.current = null;
     activeIdRef.current = null;
     setActiveId(null);
     setMessages([]);
@@ -465,24 +599,58 @@ export default function App() {
         showToast('目前只支持 TXT 文件');
         return;
       }
+      if (file.size > MAX_IMPORT_BYTES) {
+        showToast(
+          `文件超过 ${Math.round(MAX_IMPORT_BYTES / 1024 / 1024)} MB 上限，建议先按卷拆分`,
+        );
+        return;
+      }
+      if (importAbortRef.current) {
+        showToast('已有一个导入任务在进行');
+        return;
+      }
+
+      const controller = new AbortController();
+      importAbortRef.current = controller;
+      setImportJob({ name: file.name, loaded: 0, total: file.size, chapters: 0 });
+
       try {
-        const raw = await file.text();
-        const book = parseTxt(file.name, raw);
-        if (!book.chapters.length) {
-          showToast('没有从这个文件里读到内容');
+        const estimate = await estimateStorage();
+        if (
+          estimate &&
+          estimate.quota > 0 &&
+          estimate.quota - estimate.usage < file.size * 1.2
+        ) {
+          showToast('本地存储空间不足，请先清理书库');
           return;
         }
-        await saveBook(book);
+        void navigator.storage?.persist?.();
+
+        const book = await importTxtFile(
+          file,
+          (progress) => setImportJob({ name: file.name, ...progress }),
+          controller.signal,
+        );
         const next = [book, ...booksRef.current.filter((item) => item.id !== book.id)];
         booksRef.current = next;
         setBooks(next);
-        showToast(`已导入《${book.title}》· 共 ${book.chapters.length} 章`);
-        openBook(book.id, 0);
-      } catch {
-        showToast('导入失败，请检查文件编码');
+        void refreshStorage();
+        showToast(`已导入《${book.title}》· 共 ${book.chapterCount} 章`);
+        await openBook(book.id, 0);
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          showToast('已取消导入');
+        } else if (error instanceof ImportTooLargeError) {
+          showToast(error.message);
+        } else {
+          showToast(error instanceof Error ? error.message : '导入失败，请检查文件编码');
+        }
+      } finally {
+        importAbortRef.current = null;
+        setImportJob(null);
       }
     },
-    [openBook, showToast],
+    [openBook, refreshStorage, showToast],
   );
 
   const deleteBook = useCallback(
@@ -509,6 +677,10 @@ export default function App() {
       saveBookmarks(nextMarks);
 
       if (activeIdRef.current === id) {
+        loadTokenRef.current += 1;
+        searchAbortRef.current?.abort();
+        searchAbortRef.current = null;
+        latestSearchRef.current = null;
         stopSpeech();
         activeIdRef.current = null;
         setActiveId(null);
@@ -522,10 +694,11 @@ export default function App() {
           /* ignore */
         }
       }
+      void refreshStorage();
       setModal(null);
       showToast('已删除');
     },
-    [showToast, stopSpeech],
+    [refreshStorage, showToast, stopSpeech],
   );
 
   const renameBook = useCallback(
@@ -551,20 +724,15 @@ export default function App() {
   );
 
   const restoreDemo = useCallback(async () => {
-    const stamp = Date.now();
-    const demos = DEMO_BOOKS.map((book, index) => ({
-      ...book,
-      createdAt: stamp - index * 4 * 86_400_000,
-      updatedAt: stamp - index * 86_400_000,
-    }));
-    await Promise.all(demos.map(saveBook));
+    const demos = await seedDemoBooks(true);
     const ids = new Set(demos.map((book) => book.id));
     const next = [...demos, ...booksRef.current.filter((book) => !ids.has(book.id))];
     booksRef.current = next;
     setBooks(next);
+    void refreshStorage();
     setModal(null);
     showToast('已载入示例书籍');
-  }, [showToast]);
+  }, [refreshStorage, showToast]);
 
   const resetProgress = useCallback(() => {
     progressRef.current = {};
@@ -576,6 +744,10 @@ export default function App() {
   const clearAll = useCallback(async () => {
     await clearBooks();
     stopSpeech();
+    loadTokenRef.current += 1;
+    searchAbortRef.current?.abort();
+    searchAbortRef.current = null;
+    latestSearchRef.current = null;
     booksRef.current = [];
     progressRef.current = {};
     bookmarksRef.current = {};
@@ -593,9 +765,10 @@ export default function App() {
     } catch {
       /* ignore */
     }
+    void refreshStorage();
     setModal(null);
     showToast('已删除所有书籍');
-  }, [showToast, stopSpeech]);
+  }, [refreshStorage, showToast, stopSpeech]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -637,6 +810,11 @@ export default function App() {
     if (file) void importFile(file);
   };
 
+  const openSettings = () => {
+    void refreshStorage();
+    setModal({ type: 'settings' });
+  };
+
   const renameTarget =
     modal?.type === 'rename' ? books.find((book) => book.id === modal.bookId) ?? null : null;
   const deleteTarget =
@@ -670,10 +848,10 @@ export default function App() {
         onNew={newChat}
         onSearch={() => setModal({ type: 'search' })}
         onLibrary={() => setModal({ type: 'library' })}
-        onOpenBook={(id) => openBook(id)}
+        onOpenBook={(id) => void openBook(id)}
         onRename={(id) => setModal({ type: 'rename', bookId: id })}
         onDelete={(id) => setModal({ type: 'delete', bookId: id })}
-        onSettings={() => setModal({ type: 'settings' })}
+        onSettings={openSettings}
       />
 
       <div className="main">
@@ -685,7 +863,7 @@ export default function App() {
           isMobile={isMobile}
           bookmarked={bookmarked}
           onToggleSidebar={toggleSidebar}
-          onOpenBook={(id) => openBook(id)}
+          onOpenBook={(id) => void openBook(id)}
           onLibrary={() => setModal({ type: 'library' })}
           onImport={openFilePicker}
           onToggleBookmark={() => {
@@ -696,7 +874,7 @@ export default function App() {
               prev ? null : { x: rect.right, y: rect.bottom + 8 },
             )
           }
-          onOpenSettings={() => setModal({ type: 'settings' })}
+          onOpenSettings={openSettings}
           onAbout={() => setModal({ type: 'about' })}
         />
 
@@ -711,7 +889,7 @@ export default function App() {
               speakingId={speakingId}
               width={settings.width}
               onStreamEnd={handleStreamEnd}
-              onNavigate={goToChapter}
+              onNavigate={(chapter) => void goToChapter(chapter)}
               onOpenToc={() => setModal({ type: 'toc' })}
               onToggleBookmark={toggleBookmark}
               onSpeak={speak}
@@ -744,7 +922,7 @@ export default function App() {
           books={books}
           progress={progress}
           onClose={() => setModal(null)}
-          onOpenBook={(id, chapter) => openBook(id, chapter)}
+          onOpenBook={(id, chapter) => void openBook(id, chapter)}
         />
       ) : null}
 
@@ -756,7 +934,7 @@ export default function App() {
           onClose={() => setModal(null)}
           onOpenChapter={(chapter) => {
             setModal(null);
-            goToChapter(chapter);
+            void goToChapter(chapter);
           }}
         />
       ) : null}
@@ -766,7 +944,7 @@ export default function App() {
           books={books}
           progress={progress}
           onClose={() => setModal(null)}
-          onOpenBook={(id) => openBook(id)}
+          onOpenBook={(id) => void openBook(id)}
           onImport={() => {
             setModal(null);
             openFilePicker();
@@ -779,6 +957,11 @@ export default function App() {
       {modal?.type === 'settings' ? (
         <SettingsModal
           settings={settings}
+          storage={storage}
+          library={{
+            books: books.length,
+            chars: books.reduce((sum, book) => sum + book.chars, 0),
+          }}
           onChange={updateSettings}
           onClose={() => setModal(null)}
           onResetProgress={resetProgress}
@@ -824,6 +1007,16 @@ export default function App() {
         >
           <ReaderControls settings={settings} onChange={updateSettings} />
         </Popover>
+      ) : null}
+
+      {importJob ? (
+        <ImportOverlay
+          name={importJob.name}
+          loaded={importJob.loaded}
+          total={importJob.total}
+          chapters={importJob.chapters}
+          onCancel={() => importAbortRef.current?.abort()}
+        />
       ) : null}
 
       {toast ? (

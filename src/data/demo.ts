@@ -1,11 +1,11 @@
-import type { Book } from '../types';
+import type { DemoBook } from '../types';
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
 
 const now = Date.now();
 
-export const DEMO_BOOKS: Book[] = [
+export const DEMO_BOOKS: DemoBook[] = [
   {
     id: 'demo-fog-harbor',
     title: '雾港来信',

@@ -1,4 +1,4 @@
-export type Chapter = {
+export type ChapterData = {
   title: string;
   paragraphs: string[];
 };
@@ -8,10 +8,24 @@ export type Book = {
   title: string;
   author: string;
   intro?: string;
-  chapters: Chapter[];
+  chapterCount: number;
+  chapterTitles: string[];
+  chars: number;
+  bytes?: number;
   createdAt: number;
   updatedAt: number;
   source: 'demo' | 'import';
+};
+
+export type DemoBook = {
+  id: string;
+  title: string;
+  author: string;
+  intro?: string;
+  createdAt: number;
+  updatedAt: number;
+  source: 'demo';
+  chapters: ChapterData[];
 };
 
 export type Settings = {
@@ -29,7 +43,21 @@ export type ChapterHit = {
 
 export type Msg =
   | { id: string; role: 'user'; text: string }
-  | { id: string; role: 'assistant'; kind: 'chapter'; bookId: string; chapter: number }
+  | {
+      id: string;
+      role: 'assistant';
+      kind: 'chapter';
+      bookId: string;
+      chapter: number;
+      data: ChapterData;
+    }
   | { id: string; role: 'assistant'; kind: 'text'; text: string }
   | { id: string; role: 'assistant'; kind: 'toc'; bookId: string }
-  | { id: string; role: 'assistant'; kind: 'hits'; bookId: string; query: string; hits: ChapterHit[] };
+  | {
+      id: string;
+      role: 'assistant';
+      kind: 'hits';
+      bookId: string;
+      query: string;
+      hits: ChapterHit[];
+    };

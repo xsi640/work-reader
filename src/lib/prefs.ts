@@ -1,4 +1,4 @@
-import type { Book, ChapterHit, Settings } from '../types';
+import type { Settings } from '../types';
 
 const SETTINGS_KEY = 'work-reader:settings';
 const PROGRESS_KEY = 'work-reader:progress';
@@ -72,25 +72,6 @@ export function saveLastBook(id: string): void {
   }
 }
 
-export function searchBook(book: Book, query: string): ChapterHit[] {
-  const q = query.trim().toLowerCase();
-  if (!q) return [];
-  const hits: ChapterHit[] = [];
-  book.chapters.forEach((chapter, index) => {
-    for (const paragraph of chapter.paragraphs) {
-      const at = paragraph.toLowerCase().indexOf(q);
-      if (at === -1) continue;
-      const start = Math.max(0, at - 24);
-      const end = Math.min(paragraph.length, at + q.length + 34);
-      const prefix = start > 0 ? '…' : '';
-      const suffix = end < paragraph.length ? '…' : '';
-      hits.push({ chapter: index, snippet: prefix + paragraph.slice(start, end) + suffix });
-      if (hits.length >= 40) return;
-    }
-  });
-  return hits;
-}
-
 export function cnToNumber(input: string): number | null {
   if (/^\d+$/.test(input)) return Number(input);
   const digits: Record<string, number> = {
@@ -122,87 +103,4 @@ export function cnToNumber(input: string): number | null {
   }
   if (!seen) return null;
   return total + section + num;
-}
-
-const HEADING_RE =
-  /^(?:第[〇零一二三四五六七八九十百千两0-9]+[章回节卷部篇集][^\n]{0,40}|序章[^\n]{0,30}|楔子[^\n]{0,30}|尾声[^\n]{0,30}|终章[^\n]{0,30}|Chapter\s+\d+[^\n]{0,60})$/i;
-
-function toParagraphs(lines: string[]): string[] {
-  const blocks: string[] = [];
-  let current: string[] = [];
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      if (current.length) {
-        blocks.push(current.join(''));
-        current = [];
-      }
-    } else {
-      current.push(trimmed);
-    }
-  }
-  if (current.length) blocks.push(current.join(''));
-
-  const nonEmpty = lines.filter((l) => l.trim()).length;
-  if (blocks.length === 1 && nonEmpty > 2) {
-    return lines.map((l) => l.trim()).filter(Boolean);
-  }
-  return blocks.filter(Boolean);
-}
-
-export function parseTxt(filename: string, raw: string): Book {
-  const text = raw.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
-  const lines = text.split('\n');
-
-  const headingIndexes: number[] = [];
-  lines.forEach((line, i) => {
-    if (HEADING_RE.test(line.trim())) headingIndexes.push(i);
-  });
-
-  const chapters: { title: string; paragraphs: string[] }[] = [];
-
-  if (headingIndexes.length) {
-    const preface = lines.slice(0, headingIndexes[0]);
-    const prefaceParas = toParagraphs(preface);
-    if (prefaceParas.length && prefaceParas.join('').length >= 80) {
-      chapters.push({ title: '序', paragraphs: prefaceParas });
-    }
-    headingIndexes.forEach((start, i) => {
-      const end = headingIndexes[i + 1] ?? lines.length;
-      const title = lines[start].trim();
-      const paras = toParagraphs(lines.slice(start + 1, end));
-      if (paras.length) chapters.push({ title, paragraphs: paras });
-    });
-  } else {
-    const paras = toParagraphs(lines);
-    if (paras.length) {
-      const chunkSize = 2400;
-      let bucket: string[] = [];
-      let size = 0;
-      let index = 1;
-      const flush = () => {
-        if (!bucket.length) return;
-        chapters.push({ title: `第 ${index} 章`, paragraphs: bucket });
-        index += 1;
-        bucket = [];
-        size = 0;
-      };
-      for (const p of paras) {
-        bucket.push(p);
-        size += p.length;
-        if (size >= chunkSize) flush();
-      }
-      flush();
-    }
-  }
-
-  return {
-    id: `import-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    title: filename.replace(/\.txt$/i, '').replace(/^《|》$/g, '').trim() || '未命名',
-    author: '本地导入',
-    chapters,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-    source: 'import',
-  };
 }

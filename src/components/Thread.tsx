@@ -58,14 +58,20 @@ function ChapterMessage({
   onSpeak,
   showToast,
 }: ChapterProps) {
-  const chapter = book.chapters[msg.chapter];
-  const full = useMemo(() => (chapter ? chapter.paragraphs.join('\n\n') : ''), [chapter]);
-  const [chars, setChars] = useState(streaming ? 0 : full.length);
+  const chapter = msg.data;
+  const full = useMemo(() => chapter.paragraphs.join('\n\n'), [chapter]);
+  const streamable = full.length <= 20_000;
+  const [chars, setChars] = useState(streaming && streamable ? 0 : full.length);
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     if (!streaming) {
       setChars(full.length);
+      return;
+    }
+    if (!streamable) {
+      setChars(full.length);
+      onStreamEnd(msg.id);
       return;
     }
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -85,27 +91,14 @@ function ChapterMessage({
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [streaming, full, msg.id, onStreamEnd]);
-
-  if (!chapter) {
-    return (
-      <div className="msg msg-assistant" id={`msg-${msg.id}`}>
-        <div className="avatar">
-          <Mark size={22} />
-        </div>
-        <div className="msg-body">
-          <p className="assistant-text">这一章已经不在书库里了。</p>
-        </div>
-      </div>
-    );
-  }
+  }, [streaming, streamable, full, msg.id, onStreamEnd]);
 
   const visible = chars >= full.length ? full : full.slice(0, chars);
   const shown = visible.split('\n\n');
   const lastEmpty = shown.length > 0 && shown[shown.length - 1] === '';
   if (lastEmpty) shown.pop();
-  const isStreaming = streaming && chars < full.length;
-  const isLast = msg.chapter >= book.chapters.length - 1;
+  const isStreaming = streaming && streamable && chars < full.length;
+  const isLast = msg.chapter >= book.chapterCount - 1;
   const isFirst = msg.chapter <= 0;
 
   const handleCopy = async () => {
@@ -125,7 +118,7 @@ function ChapterMessage({
           <span>{book.title}</span>
           <span className="dot">·</span>
           <span>
-            第 {msg.chapter + 1} 章 / 共 {book.chapters.length} 章
+            第 {msg.chapter + 1} 章 / 共 {book.chapterCount} 章
           </span>
         </div>
         <h2 className="chapter-title">{chapter.title}</h2>
@@ -165,7 +158,7 @@ function ChapterMessage({
 
             <div className="chapter-foot">
               <span className="chapter-pos">
-                {msg.chapter + 1} / {book.chapters.length}
+                {msg.chapter + 1} / {book.chapterCount}
               </span>
               <div className="chapter-nav">
                 <button type="button" className="pill" disabled={isFirst} onClick={() => onNavigate(msg.chapter - 1)}>
@@ -259,6 +252,11 @@ export function Thread({
           if (!book) return null;
           const current = progress[book.id] ?? 0;
           const marks = bookmarks[book.id] ?? [];
+          const total = book.chapterCount;
+          const many = total > 200;
+          const start = many ? Math.max(0, current - 10) : 0;
+          const end = many ? Math.min(total, current + 11) : total;
+          const indexes = Array.from({ length: Math.max(0, end - start) }, (_, offset) => start + offset);
           return (
             <div className="msg msg-assistant" id={`msg-${msg.id}`} key={msg.id}>
               <div className="avatar">
@@ -266,10 +264,11 @@ export function Thread({
               </div>
               <div className="msg-body">
                 <p className="assistant-text">
-                  《{book.title}》共 {book.chapters.length} 章，当前读到第 {current + 1} 章。
+                  《{book.title}》共 {total} 章，当前读到第 {current + 1} 章。
+                  {many ? ' 目录较长，先显示当前章节附近；完整目录请用章节下方的「目录」按钮。' : ''}
                 </p>
                 <div className="toc-list">
-                  {book.chapters.map((chapter, index) => (
+                  {indexes.map((index) => (
                     <button
                       type="button"
                       key={index}
@@ -277,7 +276,7 @@ export function Thread({
                       onClick={() => onNavigate(index)}
                     >
                       <span className="toc-num">{String(index + 1).padStart(2, '0')}</span>
-                      <span className="toc-title">{chapter.title}</span>
+                      <span className="toc-title">{book.chapterTitles[index] ?? ''}</span>
                       {marks.includes(index) ? <Bookmark size={14} fill="currentColor" /> : null}
                       {index === current ? <span className="toc-badge">在读</span> : null}
                     </button>
@@ -309,7 +308,7 @@ export function Thread({
                       onClick={() => onNavigate(hit.chapter)}
                     >
                       <span className="hit-chapter">
-                        第 {hit.chapter + 1} 章 · {book.chapters[hit.chapter]?.title ?? ''}
+                        第 {hit.chapter + 1} 章 · {book.chapterTitles[hit.chapter] ?? ''}
                       </span>
                       <span className="hit-snippet">
                         <Highlight text={hit.snippet} query={msg.query} />
