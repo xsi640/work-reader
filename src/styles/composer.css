@@ -30,16 +30,8 @@
   transition: border-color 0.15s ease;
 }
 
-.composer-box:focus-within {
-  border-color: var(--text-3);
-}
-
 [data-theme='dark'] .composer-box {
   border-color: transparent;
-}
-
-[data-theme='dark'] .composer-box:focus-within {
-  border-color: #5a5a5a;
 }
 
 .composer-input {
@@ -56,6 +48,14 @@
   font-size: 16px;
   line-height: 24px;
   overflow-y: auto;
+}
+
+.composer-input:focus,
+.composer-input:focus-visible,
+.composer .composer-input:focus,
+.composer .composer-input:focus-visible {
+  outline: none;
+  box-shadow: none;
 }
 
 .composer-input::placeholder {
