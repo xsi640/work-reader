@@ -246,6 +246,9 @@ npm run deploy
 - `workers_dev = true`，部署后得到 `https://work-reader.<子域>.workers.dev`
 - `public/_headers`：静态资源一年 `immutable`，`index.html` 不缓存，并带基础安全头
 
+> Wrangler 会读取系统代理。如果代理拦截 Cloudflare API，可临时绕过：
+> `HTTPS_PROXY= HTTP_PROXY= ALL_PROXY= NO_PROXY='*' npm run deploy`。
+
 ### Cloudflare Pages
 
 1. Workers & Pages → Create → Pages → Connect to Git，选择 `xsi640/work-reader`。
