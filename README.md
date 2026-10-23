@@ -7,6 +7,8 @@
 左侧是会话式书库，右侧以 ChatGPT 消息流逐章展开正文。  
 输入框既是阅读指令，也是全文搜索框。所有数据留在浏览器里，没有账号，也没有服务端。
 
+**在线体验**：<https://work-reader.yeric1473.workers.dev>
+
 </div>
 
 ![Work Reader 阅读界面](docs/preview-reading.png)
@@ -188,6 +190,7 @@ npm run preview   # 本地预览构建结果
 - lucide-react 图标
 - IndexedDB + localStorage
 - 浏览器 SpeechSynthesis
+- Cloudflare Workers 静态资源（`wrangler.jsonc`）
 
 ## 项目结构
 
@@ -208,6 +211,8 @@ src/
   lib/prefs.ts           设置、进度、书签、中文数字解析
   lib/format.ts          字节 / 字数格式化
   styles/                设计令牌与各区域样式
+public/                  _headers 等静态部署文件
+wrangler.jsonc           Cloudflare Workers 静态资源配置
 docs/                    README 预览截图
 ```
 
@@ -218,6 +223,43 @@ docs/                    README 预览截图
 | `npm run dev` | 启动开发服务器 |
 | `npm run build` | 类型检查并构建到 `dist/` |
 | `npm run preview` | 预览生产构建 |
+| `npm run deploy` | 构建并部署到 Cloudflare Workers 静态资源 |
+| `npm run deploy:pages` | 构建并部署到 Cloudflare Pages |
+
+## 部署到 Cloudflare
+
+线上示例：<https://work-reader.yeric1473.workers.dev>
+
+构建产物是纯静态文件（HTML + CSS + JS），不需要服务端。
+
+### Workers 静态资源（当前使用）
+
+```bash
+npx wrangler login
+npm run deploy
+```
+
+`wrangler.jsonc` 已配置：
+
+- `assets.directory = ./dist`
+- `not_found_handling = single-page-application`：深层路径回退到 `index.html`
+- `workers_dev = true`，部署后得到 `https://work-reader.<子域>.workers.dev`
+- `public/_headers`：静态资源一年 `immutable`，`index.html` 不缓存，并带基础安全头
+
+### Cloudflare Pages
+
+1. Workers & Pages → Create → Pages → Connect to Git，选择 `xsi640/work-reader`。
+2. Build command 填 `npm run build`，Build output 填 `dist`。
+3. 环境变量加 `NODE_VERSION=22.12.0`（Vite 8 要求 Node 20.19+ / 22.12+）。
+4. 之后每次推送 `main` 会自动构建。
+
+`npm run deploy:pages` 也可以手动上传到名为 `work-reader` 的 Pages 项目；若以后增加前端路由，需要在 `public/_redirects` 加 `/* /index.html 200`（Workers 模式不需要）。
+
+### 部署后注意
+
+- 书库、进度、书签保存在访问者浏览器的 IndexedDB / localStorage 里，不会上传到 Cloudflare；不同域名等于两份独立的本地书库。
+- 首次访问会自动写入示例书籍。
+- 线上是 HTTPS，IndexedDB、剪贴板、朗读均可正常使用。
 
 ## 浏览器支持
 
