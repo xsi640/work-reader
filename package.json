@@ -8,7 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "deploy": "npm run build && wrangler deploy",
-    "deploy:pages": "npm run build && wrangler pages deploy dist --project-name work-reader"
+    "deploy:pages": "npm run build && wrangler pages deploy dist --project-name work-reader --branch main"
   },
   "engines": {
     "node": ">=20.19"

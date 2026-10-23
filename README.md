@@ -7,7 +7,7 @@
 左侧是会话式书库，右侧以 ChatGPT 消息流逐章展开正文。  
 输入框既是阅读指令，也是全文搜索框。所有数据留在浏览器里，没有账号，也没有服务端。
 
-**在线体验**：<https://work-reader.yeric1473.workers.dev>
+**在线体验**：<https://work-reader.pages.dev>
 
 </div>
 
@@ -190,7 +190,7 @@ npm run preview   # 本地预览构建结果
 - lucide-react 图标
 - IndexedDB + localStorage
 - 浏览器 SpeechSynthesis
-- Cloudflare Workers 静态资源（`wrangler.jsonc`）
+- Cloudflare Pages（当前）/ Workers 静态资源（备用）
 
 ## 项目结构
 
@@ -223,46 +223,49 @@ docs/                    README 预览截图
 | `npm run dev` | 启动开发服务器 |
 | `npm run build` | 类型检查并构建到 `dist/` |
 | `npm run preview` | 预览生产构建 |
-| `npm run deploy` | 构建并部署到 Cloudflare Workers 静态资源 |
-| `npm run deploy:pages` | 构建并部署到 Cloudflare Pages |
+| `npm run deploy` | 构建并部署到 Cloudflare Workers 静态资源（备用） |
+| `npm run deploy:pages` | 构建并部署到 Cloudflare Pages 项目 `work-reader` |
 
 ## 部署到 Cloudflare
 
-线上示例：<https://work-reader.yeric1473.workers.dev>
+线上示例：<https://work-reader.pages.dev>
 
 构建产物是纯静态文件（HTML + CSS + JS），不需要服务端。
 
-### Workers 静态资源（当前使用）
+### Cloudflare Pages（当前使用）
+
+项目名 `work-reader`，生产分支 `main`。
 
 ```bash
-npx wrangler login
+npm run deploy:pages
+```
+
+等价于：
+
+```bash
+npm run build
+npx wrangler pages deploy dist --project-name work-reader --branch main
+```
+
+首次部署前需要先在 Cloudflare 创建 Pages 项目（Workers & Pages → Create → Pages → Direct Upload，项目名 `work-reader`）。如果接 Git，仓库连上后每次推送 `main` 会自动构建，Build command 填 `npm run build`，输出目录填 `dist`，环境变量 `NODE_VERSION=22.12.0`（Vite 8 要求 Node 20.19+ / 22.12+）。
+
+### Workers 静态资源（备用）
+
+`wrangler.jsonc` 也保留了 Workers 静态资源部署：
+
+```bash
 npm run deploy
 ```
 
-`wrangler.jsonc` 已配置：
+备用地址：<https://work-reader.yeric1473.workers.dev>
 
-- `assets.directory = ./dist`
-- `not_found_handling = single-page-application`：深层路径回退到 `index.html`
-- `workers_dev = true`，部署后得到 `https://work-reader.<子域>.workers.dev`
-- `public/_headers`：静态资源一年 `immutable`，`index.html` 不缓存，并带基础安全头
+### 说明
 
-> Wrangler 会读取系统代理。如果代理拦截 Cloudflare API，可临时绕过：
-> `HTTPS_PROXY= HTTP_PROXY= ALL_PROXY= NO_PROXY='*' npm run deploy`。
-
-### Cloudflare Pages
-
-1. Workers & Pages → Create → Pages → Connect to Git，选择 `xsi640/work-reader`。
-2. Build command 填 `npm run build`，Build output 填 `dist`。
-3. 环境变量加 `NODE_VERSION=22.12.0`（Vite 8 要求 Node 20.19+ / 22.12+）。
-4. 之后每次推送 `main` 会自动构建。
-
-`npm run deploy:pages` 也可以手动上传到名为 `work-reader` 的 Pages 项目；若以后增加前端路由，需要在 `public/_redirects` 加 `/* /index.html 200`（Workers 模式不需要）。
-
-### 部署后注意
-
+- `public/_headers` 会随构建复制到 `dist/`，Pages 和 Workers 都会应用：静态资源一年 `immutable`，`index.html` 不缓存，并带基础安全头。
 - 书库、进度、书签保存在访问者浏览器的 IndexedDB / localStorage 里，不会上传到 Cloudflare；不同域名等于两份独立的本地书库。
 - 首次访问会自动写入示例书籍。
 - 线上是 HTTPS，IndexedDB、剪贴板、朗读均可正常使用。
+- 如果本机代理拦截 Cloudflare API，可临时绕过：`HTTPS_PROXY= HTTP_PROXY= ALL_PROXY= NO_PROXY='*' npm run deploy`。
 
 ## 浏览器支持
 
