@@ -265,7 +265,7 @@ npm run deploy
 - 书库、进度、书签保存在访问者浏览器的 IndexedDB / localStorage 里，不会上传到 Cloudflare；不同域名等于两份独立的本地书库。
 - 首次访问会自动写入示例书籍。
 - 线上是 HTTPS，IndexedDB、剪贴板、朗读均可正常使用。
-- 如果本机代理拦截 Cloudflare API，可临时绕过：`HTTPS_PROXY= HTTP_PROXY= ALL_PROXY= NO_PROXY='*' npm run deploy`。
+- 如果本机代理拦截 Cloudflare API，可临时绕过：`HTTPS_PROXY= HTTP_PROXY= ALL_PROXY= NO_PROXY='*' npm run deploy:pages`（Workers 备用部署同理）。
 
 ## 浏览器支持
 
