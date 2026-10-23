@@ -10,8 +10,12 @@ const MAX_CHAPTER_CHARS = 60_000;
 const AUTO_CHAPTER_CHARS = 8_000;
 const WRITE_BATCH = 8;
 const PROGRESS_INTERVAL_MS = 120;
-/** 没有换行符的超长单行也按这个粒度切开，防止一个字符串无限增长。 */
-const MAX_LINE_CHARS = 240_000;
+/** 单行超过这个长度时按句子切成小段，避免出现几千字的“段落”。 */
+const MAX_PARAGRAPH_CHARS = 1_200;
+const SENTENCE_CHUNK = 600;
+const SENTENCE_END = /[。！？!?…；;—”"』」）)】]$/;
+
+type BufferedLine = { text: string; hard: boolean };
 
 export type ImportProgress = {
   loaded: number;
@@ -28,6 +32,50 @@ export class ImportTooLargeError extends Error {
 
 const HEADING_RE =
   /^(?:第[〇零一二三四五六七八九十百千两0-9]+[章回节卷部篇集][^\n]{0,40}|序章[^\n]{0,30}|楔子[^\n]{0,30}|尾声[^\n]{0,30}|终章[^\n]{0,30}|Chapter\s+\d+[^\n]{0,60})$/i;
+
+/**
+ * 把所有行都当段落的判断：
+ * - 每行都以句末标点结尾（一行一段的常见 TXT）；
+ * - 或者平均行长达到 120 字（长行但没有句末标点）。
+ */
+function shouldSplitLines(lines: string[], blankTerminated: boolean): boolean {
+  const meaningful = lines.filter((line) => line.length > 0);
+  if (meaningful.length < 2) return false;
+
+  const allEnd = meaningful.every((line) => SENTENCE_END.test(line));
+  const average =
+    meaningful.reduce((sum, line) => sum + line.length, 0) / meaningful.length;
+
+  if (allEnd) {
+    // 被空行结束的块通常是一整段；只有 3 行以上才认为它其实是多段。
+    return blankTerminated ? meaningful.length >= 3 : true;
+  }
+  return average >= 120;
+}
+
+/** 把一行超长文本按句子切成 600–1200 字的硬段落。 */
+function splitLongText(text: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let lastEnd = 0;
+
+  for (let index = 0; index < text.length; index += 1) {
+    if (SENTENCE_END.test(text[index])) lastEnd = index + 1;
+    const size = index - start + 1;
+    if (size >= SENTENCE_CHUNK && lastEnd > start) {
+      parts.push(text.slice(start, lastEnd));
+      start = lastEnd;
+      lastEnd = start;
+    } else if (size >= SENTENCE_CHUNK * 2) {
+      parts.push(text.slice(start, index + 1));
+      start = index + 1;
+      lastEnd = start;
+    }
+  }
+
+  if (start < text.length) parts.push(text.slice(start));
+  return parts.map((part) => part.trim()).filter(Boolean);
+}
 
 const uid = () =>
   typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -74,7 +122,7 @@ export async function importTxtFile(
   let sawHeading = false;
   let autoChapters = 0;
   let baseTitle = '';
-  let buffer: string[] = [];
+  let buffer: BufferedLine[] = [];
   let paragraphs: string[] = [];
   let chars = 0;
   let part = 0;
@@ -102,15 +150,39 @@ export async function importTxtFile(
     if (queue.length >= WRITE_BATCH) await flushQueue(true);
   };
 
-  const closeParagraph = () => {
+  const closeParagraph = (blankTerminated: boolean) => {
     if (!buffer.length) return;
-    const text = buffer.join('');
+
+    if (buffer.some((line) => line.hard)) {
+      // 超长单行切出来的硬段落：每段独立，其余行仍按原规则合并。
+      let group: string[] = [];
+      for (const line of buffer) {
+        if (line.hard) {
+          if (group.length) {
+            paragraphs.push(group.join(''));
+            group = [];
+          }
+          if (line.text) paragraphs.push(line.text);
+        } else {
+          group.push(line.text);
+        }
+      }
+      if (group.length) paragraphs.push(group.join(''));
+    } else {
+      const lines = buffer.map((line) => line.text);
+      if (shouldSplitLines(lines, blankTerminated)) {
+        for (const line of lines) if (line) paragraphs.push(line);
+      } else {
+        const text = lines.join('');
+        if (text) paragraphs.push(text);
+      }
+    }
+
     buffer = [];
-    if (text) paragraphs.push(text);
   };
 
   const flushChapter = async (split: boolean): Promise<void> => {
-    closeParagraph();
+    closeParagraph(false);
     if (!paragraphs.length) {
       part = 0;
       return;
@@ -133,7 +205,7 @@ export async function importTxtFile(
   };
 
   const flushPreface = async (): Promise<void> => {
-    closeParagraph();
+    closeParagraph(false);
     if (!paragraphs.length) return;
     const payload = paragraphs;
     paragraphs = [];
@@ -144,7 +216,7 @@ export async function importTxtFile(
 
   const flushBeforeHeading = (): Promise<void> | void => {
     if (!sawHeading) {
-      closeParagraph();
+      closeParagraph(false);
       sawHeading = true;
       if (chars >= 80 && chapterIndex === 0) {
         return flushPreface();
@@ -170,17 +242,6 @@ export async function importTxtFile(
       if (line.charCodeAt(0) === 0xfeff) line = line.slice(1);
     }
 
-    // 某些导出工具会把整本书压成一行；按固定长度强切，避免字符串无限增长。
-    if (line.length > MAX_LINE_CHARS) {
-      return (async () => {
-        for (let i = 0; i < line.length; i += MAX_CHAPTER_CHARS) {
-          const pending = handleLine(line.slice(i, i + MAX_CHAPTER_CHARS));
-          if (pending) await pending;
-          if (signal.aborted) throw abortError();
-        }
-      })();
-    }
-
     const trimmed = line.trim();
 
     if (trimmed && HEADING_RE.test(trimmed)) {
@@ -191,13 +252,27 @@ export async function importTxtFile(
     }
 
     if (!trimmed) {
-      closeParagraph();
+      closeParagraph(true);
       if (!sawHeading && chars >= AUTO_CHAPTER_CHARS) return flushChapter(false);
       if (sawHeading && chars >= MAX_CHAPTER_CHARS) return flushChapter(true);
       return;
     }
 
-    buffer.push(trimmed);
+    // 整本书只有一行 / 超长单行：按句子切成硬段落。
+    if (trimmed.length > MAX_PARAGRAPH_CHARS) {
+      return (async () => {
+        for (const chunk of splitLongText(trimmed)) {
+          if (!chunk) continue;
+          buffer.push({ text: chunk, hard: true });
+          chars += chunk.length;
+          const limit = sawHeading ? MAX_CHAPTER_CHARS : AUTO_CHAPTER_CHARS;
+          if (chars >= limit) await flushChapter(sawHeading);
+          if (signal.aborted) throw abortError();
+        }
+      })();
+    }
+
+    buffer.push({ text: trimmed, hard: false });
     chars += trimmed.length;
     if (!sawHeading && chars >= AUTO_CHAPTER_CHARS) return flushChapter(false);
     if (sawHeading && chars >= MAX_CHAPTER_CHARS) return flushChapter(true);
